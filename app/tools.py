@@ -4,8 +4,8 @@ Two tools for the scheduling agent:
 - schedule_maker(date, purpose): stores a plan for a given day.
 - get_schedule(date): retrieves everything planned for a given day.
 
-Embeddings are generated via Pinecone's hosted inference API
-(multilingual-e5-large), so no local torch/GPU is needed.
+Embeddings use fastembed (ONNX Runtime, no torch/CUDA) — lightweight enough
+for Render's free tier 512MB RAM limit.
 
 get_schedule filters by exact `date` metadata rather than relying on
 vector similarity — dates are exact tokens, not semantic concepts.
@@ -14,38 +14,41 @@ vector similarity — dates are exact tokens, not semantic concepts.
 import uuid
 from datetime import datetime
 
+from fastembed import TextEmbedding
 from langchain_core.tools import tool
 from pinecone import Pinecone, ServerlessSpec
 
 from app.config import (
+    EMBEDDING_DIMENSION,
+    EMBEDDING_MODEL,
     PINECONE_API_KEY,
     PINECONE_CLOUD,
-    PINECONE_EMBEDDING_MODEL,
     PINECONE_INDEX_NAME,
     PINECONE_REGION,
 )
 
 _pc = Pinecone(api_key=PINECONE_API_KEY)
+_embedder = TextEmbedding(model_name=EMBEDDING_MODEL)
 
 
 def _ensure_index():
     existing = [idx.name for idx in _pc.list_indexes()]
     if PINECONE_INDEX_NAME not in existing:
-        # Create index with integrated (hosted) embedding — no local model needed.
         _pc.create_index(
             name=PINECONE_INDEX_NAME,
+            dimension=EMBEDDING_DIMENSION,
             metric="cosine",
             spec=ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION),
-            # Integrated embedding: Pinecone embeds text server-side
-            embed={
-                "model": PINECONE_EMBEDDING_MODEL,
-                "field_map": {"text": "purpose"},
-            },
         )
     return _pc.Index(PINECONE_INDEX_NAME)
 
 
 _index = _ensure_index()
+
+
+def _embed(text: str) -> list[float]:
+    # fastembed returns a generator of numpy arrays
+    return list(_embedder.embed([text]))[0].tolist()
 
 
 def _normalize_date(date_str: str) -> str:
@@ -72,13 +75,12 @@ def schedule_maker(date: str, purpose: str) -> str:
     """
     norm_date = _normalize_date(date)
     vector_id = f"{norm_date}-{uuid.uuid4().hex[:8]}"
-    # Upsert with text field — Pinecone embeds it server-side via integrated model
-    _index.upsert_records(
-        records=[
+    _index.upsert(
+        vectors=[
             {
                 "id": vector_id,
-                "purpose": purpose,
-                "date": norm_date,
+                "values": _embed(purpose),
+                "metadata": {"date": norm_date, "purpose": purpose},
             }
         ]
     )
@@ -97,17 +99,17 @@ def get_schedule(date: str) -> str:
         the day is free if nothing is found.
     """
     norm_date = _normalize_date(date)
-    # Search with the date string as query text; filter ensures exact-date match
-    results = _index.search(
-        query={"inputs": {"text": norm_date}, "top_k": 20},
+    result = _index.query(
+        vector=_embed(norm_date),
+        top_k=20,
         filter={"date": {"$eq": norm_date}},
         include_metadata=True,
     )
-    matches = results.get("matches") or results.get("results") or []
+    matches = result.matches
     if not matches:
         return f"No plans found for {norm_date}. That day looks free."
 
-    items = [m.get("metadata", {}).get("purpose", "") for m in matches if m.get("metadata", {}).get("purpose")]
+    items = [m.metadata["purpose"] for m in matches if m.metadata.get("purpose")]
     if not items:
         return f"No plans found for {norm_date}. That day looks free."
     return f"On {norm_date} you have: {'; '.join(items)}."

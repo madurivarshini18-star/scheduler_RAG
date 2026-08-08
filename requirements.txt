@@ -5,8 +5,10 @@ langchain-groq>=0.3.0,<0.4.0
 # langgraph provides create_react_agent
 langgraph>=0.2.0,<0.3.0
 
-# Pinecone SDK — use inference API for embeddings (no torch/sentence-transformers needed)
 pinecone>=3.0.0,<4.0.0
+
+# fastembed: ONNX-based embeddings, no torch/CUDA, ~50MB — fits Render free tier
+fastembed>=0.3.0,<1.0.0
 
 fastapi>=0.115.0,<1.0.0
 uvicorn[standard]>=0.34.0,<1.0.0
