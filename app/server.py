@@ -57,123 +57,178 @@ def health():
 
 @app.get("/agent/playground", response_class=HTMLResponse)
 def playground():
-    """Schedule entry UI — collects date + activity, silently saves, resets for next entry."""
     return """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Schedule Planner</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: 'Segoe UI', sans-serif;
-      background: #f0f4ff;
+      background: #eef2ff;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      margin: 0;
+      padding: 24px 16px;
     }
     .card {
       background: #fff;
-      border-radius: 16px;
-      padding: 40px 36px;
+      border-radius: 18px;
+      padding: 36px 32px;
       width: 100%;
-      max-width: 440px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+      max-width: 480px;
+      box-shadow: 0 10px 40px rgba(79,110,247,0.12);
     }
-    h1 { font-size: 1.5rem; margin: 0 0 4px; color: #1a1a2e; }
-    .subtitle { color: #888; font-size: 0.9rem; margin: 0 0 28px; }
-    label { display: block; font-size: 0.85rem; font-weight: 600; color: #444; margin-bottom: 6px; }
-    input[type="date"], input[type="text"] {
-      width: 100%;
-      padding: 11px 14px;
-      border: 1.5px solid #dde1f0;
-      border-radius: 8px;
-      font-size: 1rem;
-      color: #1a1a2e;
-      outline: none;
-      transition: border-color 0.2s;
-      margin-bottom: 20px;
+    h1 { font-size: 1.5rem; color: #1a1a2e; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 0.88rem; margin-bottom: 28px; }
+
+    /* Tab toggle */
+    .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
+    .tab {
+      flex: 1; padding: 10px; border: 2px solid #dde1f0;
+      border-radius: 10px; background: #fff; font-size: 0.9rem;
+      font-weight: 600; color: #888; cursor: pointer; transition: all 0.18s;
     }
-    input:focus { border-color: #4f6ef7; }
-    button {
-      width: 100%;
-      padding: 12px;
-      background: #4f6ef7;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
+    .tab.active { border-color: #4f6ef7; background: #4f6ef7; color: #fff; }
+
+    /* Panels */
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    label { display: block; font-size: 0.82rem; font-weight: 600; color: #555; margin-bottom: 5px; margin-top: 16px; }
+    label:first-of-type { margin-top: 0; }
+    input[type="date"], input[type="text"], textarea {
+      width: 100%; padding: 11px 13px;
+      border: 1.5px solid #dde1f0; border-radius: 8px;
+      font-size: 0.97rem; color: #1a1a2e; outline: none;
+      transition: border-color 0.18s; font-family: inherit;
     }
-    button:hover:not(:disabled) { background: #3a57e8; }
-    button:disabled { background: #b0bcf7; cursor: not-allowed; }
-    .status {
-      margin-top: 16px;
-      text-align: center;
-      font-size: 0.9rem;
-      min-height: 22px;
-      color: #4f6ef7;
+    input:focus, textarea:focus { border-color: #4f6ef7; }
+    textarea { resize: vertical; min-height: 80px; }
+
+    .btn {
+      margin-top: 20px; width: 100%; padding: 12px;
+      background: #4f6ef7; color: #fff; border: none;
+      border-radius: 9px; font-size: 1rem; font-weight: 600;
+      cursor: pointer; transition: background 0.18s;
     }
+    .btn:hover:not(:disabled) { background: #3a57e8; }
+    .btn:disabled { background: #b0bcf7; cursor: not-allowed; }
+
+    .status { margin-top: 14px; font-size: 0.88rem; min-height: 20px; color: #4f6ef7; text-align: center; }
     .status.error { color: #e53e3e; }
+
+    /* Answer box */
+    .answer {
+      margin-top: 18px; background: #f5f7ff;
+      border: 1.5px solid #dde1f0; border-radius: 10px;
+      padding: 14px 16px; font-size: 0.93rem; color: #1a1a2e;
+      line-height: 1.6; display: none; white-space: pre-wrap;
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>📅 Schedule Planner</h1>
-    <p class="subtitle">Add your plans for the day</p>
-    <form id="form">
-      <label for="date">Date</label>
-      <input type="date" id="date" required />
-      <label for="activity">What are you doing?</label>
-      <input type="text" id="activity" placeholder="e.g. Team offsite, Dentist at 3pm" autocomplete="off" required />
-      <button id="btn" type="submit">Save Plan</button>
-    </form>
-    <div class="status" id="status"></div>
+<div class="card">
+  <h1>📅 Schedule Planner</h1>
+  <p class="subtitle">Save your plans or ask about your schedule</p>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('save', this)">💾 Save Plan</button>
+    <button class="tab" onclick="switchTab('ask', this)">🔍 Ask Schedule</button>
   </div>
-  <script>
-    const form = document.getElementById('form');
-    const dateInput = document.getElementById('date');
-    const activityInput = document.getElementById('activity');
-    const btn = document.getElementById('btn');
-    const status = document.getElementById('status');
 
-    // Default date to today
-    dateInput.value = new Date().toISOString().split('T')[0];
+  <!-- SAVE PANEL -->
+  <div class="panel active" id="panel-save">
+    <label for="date">Date</label>
+    <input type="date" id="date" required/>
+    <label for="purpose">What are you doing?</label>
+    <input type="text" id="purpose" placeholder="e.g. Team offsite, Dentist at 3pm" autocomplete="off"/>
+    <button class="btn" id="save-btn" onclick="savePlan()">Save Plan</button>
+    <div class="status" id="save-status"></div>
+  </div>
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const date = dateInput.value;
-      const activity = activityInput.value.trim();
-      if (!date || !activity) return;
+  <!-- ASK PANEL -->
+  <div class="panel" id="panel-ask">
+    <label for="question">Your question</label>
+    <textarea id="question" placeholder="e.g. Do I have anything on Aug 20? Can I go to a movie on Saturday?"></textarea>
+    <button class="btn" id="ask-btn" onclick="askAgent()">Ask</button>
+    <div class="answer" id="answer"></div>
+    <div class="status error" id="ask-status"></div>
+  </div>
+</div>
 
-      btn.disabled = true;
-      status.className = 'status';
-      status.textContent = 'Saving...';
+<script>
+  // Default date to today
+  document.getElementById('date').value = new Date().toISOString().split('T')[0];
 
-      try {
-        const res = await fetch('/agent/invoke', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input: `Save this plan: on ${date} I have ${activity}` }),
-        });
-        await res.json(); // consume response, don't show it
-        status.textContent = '✓ Saved! Add another plan below.';
-        activityInput.value = '';
-        activityInput.focus();
-      } catch (err) {
-        status.className = 'status error';
-        status.textContent = 'Something went wrong. Try again.';
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  </script>
+  function switchTab(name, el) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  async function savePlan() {
+    const date = document.getElementById('date').value;
+    const purpose = document.getElementById('purpose').value.trim();
+    const btn = document.getElementById('save-btn');
+    const status = document.getElementById('save-status');
+    if (!date || !purpose) { status.className='status error'; status.textContent='Please fill in both fields.'; return; }
+    btn.disabled = true;
+    status.className = 'status';
+    status.textContent = 'Saving...';
+    try {
+      const res = await fetch('/agent/invoke', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ input: `Save this plan: on ${date} I have ${purpose}` }),
+      });
+      await res.json();
+      status.textContent = '✓ Plan saved! Add another below.';
+      document.getElementById('purpose').value = '';
+      document.getElementById('purpose').focus();
+    } catch {
+      status.className = 'status error';
+      status.textContent = 'Something went wrong. Try again.';
+    } finally { btn.disabled = false; }
+  }
+
+  async function askAgent() {
+    const q = document.getElementById('question').value.trim();
+    const btn = document.getElementById('ask-btn');
+    const answer = document.getElementById('answer');
+    const status = document.getElementById('ask-status');
+    if (!q) return;
+    btn.disabled = true;
+    answer.style.display = 'none';
+    status.textContent = '';
+    btn.textContent = 'Thinking...';
+    try {
+      const res = await fetch('/agent/invoke', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ input: q }),
+      });
+      const data = await res.json();
+      answer.style.display = 'block';
+      answer.textContent = data.output || 'No response.';
+    } catch {
+      status.textContent = 'Something went wrong. Try again.';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Ask';
+    }
+  }
+
+  // Allow Enter in question textarea with Ctrl+Enter
+  document.getElementById('question').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.ctrlKey) askAgent();
+  });
+</script>
 </body>
 </html>
 """
