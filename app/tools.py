@@ -4,15 +4,11 @@ Two tools for the scheduling agent:
 - schedule_maker(date, purpose): stores a plan for a given day.
 - get_schedule(date): retrieves everything planned for a given day.
 
-Design notes:
-1. get_schedule does NOT rely on vector similarity to find the right day.
-   Dates are exact tokens, not semantic concepts, so similarity search over
-   them is unreliable ("2026-08-20" isn't meaningfully "close to"
-   "2026-08-21"). Instead we filter Pinecone by an exact `date` metadata
-   field and only use the embedding to satisfy Pinecone's query API.
-2. We talk to Pinecone via its native SDK (not langchain-pinecone), since
-   that wrapper doesn't yet support langchain-core 1.x. This also means
-   embeddings are computed directly with sentence-transformers.
+Embeddings are generated via Pinecone's hosted inference API
+(multilingual-e5-large), so no local torch/GPU is needed.
+
+get_schedule filters by exact `date` metadata rather than relying on
+vector similarity — dates are exact tokens, not semantic concepts.
 """
 
 import uuid
@@ -20,29 +16,31 @@ from datetime import datetime
 
 from langchain_core.tools import tool
 from pinecone import Pinecone, ServerlessSpec
-from sentence_transformers import SentenceTransformer
 
 from app.config import (
-    EMBEDDING_DIMENSION,
-    EMBEDDING_MODEL,
     PINECONE_API_KEY,
     PINECONE_CLOUD,
+    PINECONE_EMBEDDING_MODEL,
     PINECONE_INDEX_NAME,
     PINECONE_REGION,
 )
 
 _pc = Pinecone(api_key=PINECONE_API_KEY)
-_model = SentenceTransformer(EMBEDDING_MODEL)
 
 
 def _ensure_index():
     existing = [idx.name for idx in _pc.list_indexes()]
     if PINECONE_INDEX_NAME not in existing:
+        # Create index with integrated (hosted) embedding — no local model needed.
         _pc.create_index(
             name=PINECONE_INDEX_NAME,
-            dimension=EMBEDDING_DIMENSION,
             metric="cosine",
             spec=ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION),
+            # Integrated embedding: Pinecone embeds text server-side
+            embed={
+                "model": PINECONE_EMBEDDING_MODEL,
+                "field_map": {"text": "purpose"},
+            },
         )
     return _pc.Index(PINECONE_INDEX_NAME)
 
@@ -50,21 +48,15 @@ def _ensure_index():
 _index = _ensure_index()
 
 
-def _embed(text: str) -> list[float]:
-    return _model.encode(text, normalize_embeddings=True).tolist()
-
-
 def _normalize_date(date_str: str) -> str:
-    """Accepts a handful of common formats and normalizes to YYYY-MM-DD.
-    The agent is instructed (see agent.py system prompt) to always pass
-    ISO dates, but this keeps the tool safe if it doesn't."""
+    """Normalize common date formats to YYYY-MM-DD."""
     date_str = date_str.strip()
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%B %d, %Y", "%d %B %Y"):
         try:
             return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    return date_str  # fall back to whatever the model gave us
+    return date_str
 
 
 @tool
@@ -73,20 +65,20 @@ def schedule_maker(date: str, purpose: str) -> str:
 
     Args:
         date: The date in YYYY-MM-DD format (e.g. "2026-08-20").
-        purpose: What the person is doing that day (e.g. "team offsite",
-            "dentist appointment 3pm").
+        purpose: What the person is doing that day (e.g. "team offsite").
 
     Returns:
         A confirmation message.
     """
     norm_date = _normalize_date(date)
     vector_id = f"{norm_date}-{uuid.uuid4().hex[:8]}"
-    _index.upsert(
-        vectors=[
+    # Upsert with text field — Pinecone embeds it server-side via integrated model
+    _index.upsert_records(
+        records=[
             {
                 "id": vector_id,
-                "values": _embed(purpose),
-                "metadata": {"date": norm_date, "purpose": purpose},
+                "purpose": purpose,
+                "date": norm_date,
             }
         ]
     )
@@ -105,16 +97,17 @@ def get_schedule(date: str) -> str:
         the day is free if nothing is found.
     """
     norm_date = _normalize_date(date)
-    result = _index.query(
-        vector=_embed(norm_date),
-        top_k=20,
+    # Search with the date string as query text; filter ensures exact-date match
+    results = _index.search(
+        query={"inputs": {"text": norm_date}, "top_k": 20},
         filter={"date": {"$eq": norm_date}},
         include_metadata=True,
     )
-    matches = result.matches
+    matches = results.get("matches") or results.get("results") or []
     if not matches:
         return f"No plans found for {norm_date}. That day looks free."
 
-    items = [m["metadata"]["purpose"] for m in matches]
-    joined = "; ".join(items)
-    return f"On {norm_date} you have: {joined}."
+    items = [m.get("metadata", {}).get("purpose", "") for m in matches if m.get("metadata", {}).get("purpose")]
+    if not items:
+        return f"No plans found for {norm_date}. That day looks free."
+    return f"On {norm_date} you have: {'; '.join(items)}."
