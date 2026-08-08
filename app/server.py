@@ -57,75 +57,120 @@ def health():
 
 @app.get("/agent/playground", response_class=HTMLResponse)
 def playground():
-    """Simple chat UI to interact with the scheduling agent."""
+    """Schedule entry UI — collects date + activity, silently saves, resets for next entry."""
     return """
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Schedule Agent</title>
+  <title>Schedule Planner</title>
   <style>
-    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; background: #f9f9f9; }
-    h1 { font-size: 1.4rem; margin-bottom: 4px; }
-    p  { color: #555; margin-top: 0; font-size: 0.9rem; }
-    #chat { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; min-height: 300px; max-height: 500px; overflow-y: auto; margin-bottom: 12px; }
-    .msg { margin: 8px 0; line-height: 1.5; }
-    .user   { color: #1a56db; font-weight: 600; }
-    .agent  { color: #111; }
-    .thinking { color: #aaa; font-style: italic; }
-    #form { display: flex; gap: 8px; }
-    #input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
-    button { padding: 10px 20px; background: #1a56db; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 1rem; }
-    button:disabled { background: #aaa; cursor: not-allowed; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f0f4ff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 40px 36px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; color: #1a1a2e; }
+    .subtitle { color: #888; font-size: 0.9rem; margin: 0 0 28px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; color: #444; margin-bottom: 6px; }
+    input[type="date"], input[type="text"] {
+      width: 100%;
+      padding: 11px 14px;
+      border: 1.5px solid #dde1f0;
+      border-radius: 8px;
+      font-size: 1rem;
+      color: #1a1a2e;
+      outline: none;
+      transition: border-color 0.2s;
+      margin-bottom: 20px;
+    }
+    input:focus { border-color: #4f6ef7; }
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #4f6ef7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover:not(:disabled) { background: #3a57e8; }
+    button:disabled { background: #b0bcf7; cursor: not-allowed; }
+    .status {
+      margin-top: 16px;
+      text-align: center;
+      font-size: 0.9rem;
+      min-height: 22px;
+      color: #4f6ef7;
+    }
+    .status.error { color: #e53e3e; }
   </style>
 </head>
 <body>
-  <h1>📅 Schedule Agent</h1>
-  <p>Tell me your plans or ask what you have on a given day.</p>
-  <div id="chat"></div>
-  <form id="form">
-    <input id="input" type="text" placeholder="e.g. I have a meeting on 2026-08-20" autocomplete="off" />
-    <button id="btn" type="submit">Send</button>
-  </form>
+  <div class="card">
+    <h1>📅 Schedule Planner</h1>
+    <p class="subtitle">Add your plans for the day</p>
+    <form id="form">
+      <label for="date">Date</label>
+      <input type="date" id="date" required />
+      <label for="activity">What are you doing?</label>
+      <input type="text" id="activity" placeholder="e.g. Team offsite, Dentist at 3pm" autocomplete="off" required />
+      <button id="btn" type="submit">Save Plan</button>
+    </form>
+    <div class="status" id="status"></div>
+  </div>
   <script>
-    const chat = document.getElementById('chat');
     const form = document.getElementById('form');
-    const input = document.getElementById('input');
+    const dateInput = document.getElementById('date');
+    const activityInput = document.getElementById('activity');
     const btn = document.getElementById('btn');
+    const status = document.getElementById('status');
 
-    function addMsg(text, cls) {
-      const div = document.createElement('div');
-      div.className = 'msg ' + cls;
-      div.textContent = text;
-      chat.appendChild(div);
-      chat.scrollTop = chat.scrollHeight;
-      return div;
-    }
+    // Default date to today
+    dateInput.value = new Date().toISOString().split('T')[0];
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = '';
+      const date = dateInput.value;
+      const activity = activityInput.value.trim();
+      if (!date || !activity) return;
+
       btn.disabled = true;
-      addMsg('You: ' + text, 'user');
-      const thinking = addMsg('Agent is thinking...', 'thinking');
+      status.className = 'status';
+      status.textContent = 'Saving...';
+
       try {
         const res = await fetch('/agent/invoke', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input: text }),
+          body: JSON.stringify({ input: `Save this plan: on ${date} I have ${activity}` }),
         });
-        const data = await res.json();
-        thinking.remove();
-        addMsg('Agent: ' + (data.output || data.detail || JSON.stringify(data)), 'agent');
+        await res.json(); // consume response, don't show it
+        status.textContent = '✓ Saved! Add another plan below.';
+        activityInput.value = '';
+        activityInput.focus();
       } catch (err) {
-        thinking.remove();
-        addMsg('Error: ' + err.message, 'thinking');
+        status.className = 'status error';
+        status.textContent = 'Something went wrong. Try again.';
       } finally {
         btn.disabled = false;
-        input.focus();
       }
     });
   </script>
