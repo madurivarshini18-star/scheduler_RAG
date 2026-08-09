@@ -2,51 +2,59 @@ import json
 import re
 from datetime import datetime
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from app.config import GROQ_API_KEY, GROQ_MODEL
 from app.tools import get_schedule, update_schedule
 
-# Map tool names to callables
 TOOLS = {
     "get_schedule": get_schedule,
     "update_schedule": update_schedule,
 }
 
+# Plain LLM — NO bind_tools, no tool schemas sent to Groq API
 llm = ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0)
-llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
 
 def _system_prompt() -> str:
     today = datetime.now().strftime("%Y-%m-%d (%A)")
-    return f"""You are an intelligent scheduling assistant. Today is {today}.
+    return f"""You are a scheduling assistant. Today is {today}.
 
-You have two tools:
-- get_schedule: Retrieve schedule entries by date or natural language query.
-- update_schedule: Add, update, or delete schedule entries.
+You can call two tools by responding ONLY with a JSON block like this (no other text):
+
+To retrieve schedule:
+{{"tool": "get_schedule", "args": {{"query": "YYYY-MM-DD"}}}}
+
+To add/update/delete an event:
+{{"tool": "update_schedule", "args": {{"action": "add", "title": "Event title", "date": "YYYY-MM-DD", "time": "HH:MM", "event_type": "meeting", "description": ""}}}}
 
 Rules:
-1. Resolve relative dates (tomorrow, next Friday, this weekend) to exact YYYY-MM-DD using today as reference.
-2. For any question about what is scheduled, call get_schedule first then answer based on results.
-3. For adding/moving/removing events, call update_schedule with action "add", "update", or "delete".
-4. For availability checks, call get_schedule for that date and report findings.
-5. Never invent events — only report what the tools return.
-6. Confirm all changes clearly to the user."""
+1. Always resolve relative dates to exact YYYY-MM-DD using today ({today}) as reference.
+2. For any query about schedule or availability, output ONLY the get_schedule JSON.
+3. For adding/updating/deleting events, output ONLY the update_schedule JSON.
+4. After receiving tool results, answer the user naturally based on those results.
+5. Never invent schedule data — only use what the tool returns.
+6. If no tool is needed, answer directly."""
 
 
-def _parse_xml_tool_calls(text: str) -> list[dict]:
-    """Parse XML-style tool calls that Groq sometimes generates instead of JSON."""
-    calls = []
-    pattern = r'<function=(\w+)(\{.*?\})</function>'
-    for match in re.finditer(pattern, text, re.DOTALL):
-        name = match.group(1)
+def _extract_tool_call(text: str) -> dict | None:
+    """Extract a JSON tool call from the model response."""
+    # Try to find a JSON block
+    match = re.search(r'\{[^{}]*"tool"\s*:[^{}]*\}', text, re.DOTALL)
+    if match:
         try:
-            args = json.loads(match.group(2))
-            calls.append({"name": name, "args": args, "id": f"call_{len(calls)}"})
+            return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-    return calls
+    # Try the whole text
+    try:
+        data = json.loads(text.strip())
+        if "tool" in data:
+            return data
+    except json.JSONDecodeError:
+        pass
+    return None
 
 
 def run_agent(user_input: str) -> str:
@@ -55,48 +63,30 @@ def run_agent(user_input: str) -> str:
         HumanMessage(content=user_input),
     ]
 
-    for _ in range(5):  # max 5 tool-call rounds
-        response = llm_with_tools.invoke(messages)
-        messages.append(response)
+    for _ in range(5):
+        response = llm.invoke(messages)
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        messages.append(AIMessage(content=content))
 
-        # Get tool calls — either from structured response or XML fallback
-        tool_calls = []
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_calls = response.tool_calls
-        elif hasattr(response, "content") and isinstance(response.content, str):
-            tool_calls = _parse_xml_tool_calls(response.content)
+        tool_call = _extract_tool_call(content)
+        if not tool_call:
+            # No tool call — this is the final answer
+            return content.strip() or "I couldn't process that request."
 
-        if not tool_calls:
-            # No tool calls — return final answer
-            content = response.content
-            if isinstance(content, list):
-                content = " ".join(
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            return content or "I'm sorry, I couldn't process that request."
+        # Execute the tool
+        name = tool_call.get("tool", "")
+        args = tool_call.get("args", {})
+        tool_fn = TOOLS.get(name)
 
-        # Execute each tool call
-        for call in tool_calls:
-            name = call.get("name") or call.get("function", {}).get("name", "")
-            args = call.get("args") or call.get("function", {}).get("arguments", {})
-            call_id = call.get("id", "call_0")
+        if tool_fn:
+            try:
+                result = tool_fn.invoke(args)
+            except Exception as e:
+                result = f"Tool error: {e}"
+        else:
+            result = f"Unknown tool: {name}"
 
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
+        # Feed tool result back as a human message
+        messages.append(HumanMessage(content=f"Tool result for {name}:\n{result}"))
 
-            tool_fn = TOOLS.get(name)
-            if tool_fn:
-                try:
-                    result = tool_fn.invoke(args)
-                except Exception as e:
-                    result = f"Tool error: {e}"
-            else:
-                result = f"Unknown tool: {name}"
-
-            messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
-
-    return "I reached the maximum number of steps. Please try a more specific question."
+    return "I reached the maximum steps. Please try a more specific question."
