@@ -2,7 +2,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -46,7 +46,10 @@ class AgentOutput(BaseModel):
 
 @app.post("/agent/invoke", response_model=AgentOutput)
 def agent_invoke(payload: AgentInput) -> AgentOutput:
-    return AgentOutput(output=run_agent(payload.input))
+    try:
+        return AgentOutput(output=run_agent(payload.input))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/agent/stream")
@@ -208,10 +211,14 @@ async function askAgent() {
       body:JSON.stringify({input:q}),
     });
     const data = await res.json();
-    answer.style.display='block';
-    answer.textContent = data.output || 'No response.';
-  } catch {
-    status.textContent='Something went wrong. Try again.';
+    if (!res.ok) {
+      status.textContent = 'Error: ' + (data.detail || res.statusText);
+    } else {
+      answer.style.display='block';
+      answer.textContent = data.output || 'No response.';
+    }
+  } catch(err) {
+    status.textContent='Network error: ' + err.message;
   } finally { btn.disabled=false; btn.textContent='Ask'; }
 }
 
