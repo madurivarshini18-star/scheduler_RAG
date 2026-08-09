@@ -1,0 +1,4 @@
+Deployed URL: https://scheduler-agent-1.onrender.com
+Playground UI: https://scheduler-agent-1.onrender.com/agent/playground
+API Endpoint: https://scheduler-agent-1.onrender.com/agent/invoke
+Health Check: https://scheduler-agent-1.onrender.com/health
